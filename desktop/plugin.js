@@ -12,6 +12,11 @@ import {
   ConfirmDialog,
   SearchField,
   SegmentedControl,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   PALETTE_AREA,
   STATUSBAR_AREAS
 } from '@hermes/plugin-sdk'
@@ -23,8 +28,9 @@ const PANE_ID = `${ID}:studio`
 let CTX = null
 
 // ------------------------------------------------------------------ state
-const $repo = atom('') // repository shown in the "Repository" scope
-const $scope = atom('inbox') // 'inbox' (open PRs across GitHub) | 'repo'
+// Which list the dropdown shows: ALL (your open PRs across GitHub) or one owner/repo.
+const ALL = '*'
+const $repo = atom(ALL)
 const $selected = atom(null) // { repo, number } of the open PR
 const $open = atom(false) // PR Studio tile is open
 const $watch = atom([]) // ['owner/repo#12', ...]
@@ -41,7 +47,6 @@ const errText = e => (e && (e.detail || e.message)) || String(e)
 
 function persist() {
   CTX.storage.set('repo', $repo.get())
-  CTX.storage.set('scope', $scope.get())
   CTX.storage.set('watch', $watch.get())
   CTX.storage.set('drafts', $drafts.get())
 }
@@ -459,7 +464,16 @@ function Inbox({ filter }) {
     // The backend module loads once per Hermes run, so right after an update
     // the new route is missing until Hermes restarts.
     if (/not found|404/i.test(errText(inbox.error))) {
-      return jsx('div', { className: 'prs-empty', children: 'PR Studio was just updated. Restart Hermes to load your pull requests here — meanwhile, use the Repository tab.' })
+      return jsxs('div', {
+        className: 'prs-empty',
+        children: [
+          jsx('div', { children: 'PR Studio was updated, but the Hermes background service is still running the old version. Restarting it loads the new list (open chats reconnect on their own). Meanwhile, pick a repository from the dropdown above.' }),
+          typeof host.restartGateway === 'function' && jsx('div', {
+            style: { marginTop: 10 },
+            children: jsxs(Button, { size: 'xs', variant: 'outline', onClick: () => host.restartGateway().then(() => queryClient.invalidateQueries({ queryKey: [ID] })), children: [Ic('debug-restart', 12), ' Restart Hermes service'] })
+          })
+        ]
+      })
     }
     return jsx(ErrorBox, { error: inbox.error, retry: inbox.refetch })
   }
@@ -485,93 +499,112 @@ function Inbox({ filter }) {
 }
 
 // --------------------------------------------------------- repository scope
-function RepoPicker() {
-  const repo = useValue($repo)
-  const projectRepo = useProjectRepo()
-  const [text, setText] = useState(repo)
-  useEffect(() => setText(repo), [repo])
-  const repos = useQuery({ queryKey: [ID, 'repos'], queryFn: () => api('/repos'), staleTime: 300000 })
-  useEffect(() => {
-    if (projectRepo && !$repo.get()) setRepo(projectRepo)
-  }, [projectRepo])
-  const submit = () => {
-    const v = text.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/$/, '')
-    if (/^[\w.-]+\/[\w.-]+$/.test(v)) setRepo(v)
-    else host.notify({ kind: 'warning', message: 'Enter a repository as owner/name' })
-  }
-  return jsxs('div', {
-    className: 'prs-top',
-    children: [
-      Ic('repo'),
-      jsx('input', {
-        className: 'prs-in desktop-input-chrome', list: `${ID}-repos`, value: text, placeholder: 'owner/repo',
-        onChange: e => setText(e.target.value),
-        onKeyDown: e => { if (e.key === 'Enter') submit() },
-        onBlur: () => { if (text !== repo && text.includes('/')) submit() }
-      }),
-      jsx('datalist', { id: `${ID}-repos`, children: (repos.data?.repos || []).map(r => jsx('option', { value: r }, r)) }),
-      projectRepo && projectRepo !== repo &&
-        jsx(IconBtn, { icon: 'target', title: `Use this project's repo (${projectRepo})`, onClick: () => setRepo(projectRepo) })
-    ]
-  })
-}
-
 const STATES = [{ id: 'OPEN', label: 'Open' }, { id: 'MERGED', label: 'Merged' }, { id: 'CLOSED', label: 'Closed' }, { id: 'ALL', label: 'All' }]
 
-function RepoList({ filter }) {
-  const repo = useValue($repo)
+function RepoList({ repo, filter }) {
   const [state, setState] = useState('OPEN')
   const list = useQuery({
     queryKey: [ID, 'pulls', repo, state],
     queryFn: () => api(`/pulls?${q({ repo, state })}`),
-    enabled: Boolean(repo),
     refetchInterval: 90000
   })
   const f = filter.trim().toLowerCase()
   const items = (list.data?.pulls || []).filter(pr => matches(pr, f))
   return jsxs(Fragment, {
     children: [
-      jsx(RepoPicker, {}),
-      repo && jsx('div', { className: 'prs-top', children: jsx(SegmentedControl, { options: STATES, value: state, onChange: setState, sizing: 'content' }) }),
+      jsx('div', { className: 'prs-top', children: jsx(SegmentedControl, { options: STATES, value: state, onChange: setState, sizing: 'content' }) }),
       jsx('div', {
         className: 'prs-scroll',
-        children: !repo
-          ? jsx('div', { className: 'prs-empty', children: 'Type a repository as owner/name, or open a project folder that has a GitHub remote.' })
-          : list.isLoading
-            ? jsx(Loading, {})
-            : list.error
-              ? jsx(ErrorBox, { error: list.error, retry: list.refetch })
-              : !items.length
-                ? jsx('div', { className: 'prs-empty', children: 'No pull requests.' })
-                : items.map(pr => jsx(PRRow, { pr, repo }, pr.number))
+        children: list.isLoading
+          ? jsx(Loading, {})
+          : list.error
+            ? jsx(ErrorBox, { error: list.error, retry: list.refetch })
+            : !items.length
+              ? jsx('div', { className: 'prs-empty', children: state === 'OPEN' ? `No open pull requests in ${repo}.` : 'No pull requests.' })
+              : items.map(pr => jsx(PRRow, { pr, repo }, pr.number))
       })
     ]
   })
 }
 
-// ---------------------------------------------------------------- PR list
-const SCOPES = [{ id: 'inbox', label: 'Inbox' }, { id: 'repo', label: 'Repository' }]
+// ------------------------------------------------------------ repo dropdown
+const OTHER = '__other__'
 
+function RepoSelect() {
+  const repo = useValue($repo)
+  const projectRepo = useProjectRepo()
+  const repos = useQuery({ queryKey: [ID, 'repos'], queryFn: () => api('/repos'), staleTime: 300000 })
+  const [typing, setTyping] = useState(false)
+  const [text, setText] = useState('')
+  const known = repos.data?.repos || []
+  // Keep the current pick listed even if it isn't one of "your" repos.
+  const extra = [projectRepo, repo].filter(r => r && r !== ALL && !known.includes(r))
+  const options = [...new Set([...extra, ...known])]
+  const pick = v => {
+    if (v === OTHER) { setText(''); setTyping(true); return }
+    setTyping(false)
+    setRepo(v)
+  }
+  const submit = () => {
+    const v = text.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/$/, '')
+    if (/^[\w.-]+\/[\w.-]+$/.test(v)) { setTyping(false); setRepo(v) } else host.notify({ kind: 'warning', message: 'Enter a repository as owner/name' })
+  }
+  if (typing) {
+    return jsxs('div', {
+      style: { flex: 1, minWidth: 0, display: 'flex', gap: 4, alignItems: 'center' },
+      children: [
+        jsx('input', {
+          className: 'prs-in desktop-input-chrome', autoFocus: true, value: text, placeholder: 'owner/repo, then Enter',
+          onChange: e => setText(e.target.value),
+          onKeyDown: e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') setTyping(false) }
+        }),
+        jsx(IconBtn, { icon: 'close', title: 'Cancel', onClick: () => setTyping(false) })
+      ]
+    })
+  }
+  return jsx('div', {
+    style: { flex: 1, minWidth: 0 },
+    children: jsxs(Select, {
+      value: repo || ALL,
+      onValueChange: pick,
+      children: [
+        jsx(SelectTrigger, { size: 'sm', 'aria-label': 'Repository', children: jsx(SelectValue, {}) }),
+        jsxs(SelectContent, {
+          children: [
+            jsx(SelectItem, { value: ALL, children: 'All my open PRs' }),
+            projectRepo && jsx(SelectItem, { value: projectRepo, children: `${projectRepo} · this project` }, `p:${projectRepo}`),
+            ...options.filter(r => r !== projectRepo).map(r => jsx(SelectItem, { value: r, children: r }, r)),
+            repos.isLoading && jsx(SelectItem, { value: '__loading__', disabled: true, children: 'Loading your repositories…' }),
+            jsx(SelectItem, { value: OTHER, children: 'Other repository…' })
+          ]
+        })
+      ]
+    })
+  })
+}
+
+// ---------------------------------------------------------------- PR list
 function PRList() {
-  const scope = useValue($scope)
+  const repo = useValue($repo)
   const [filter, setFilter] = useState('')
   const qc = useQueryClient()
   const status = useGhStatus()
   if (status.data && (!status.data.gh || !status.data.login)) return jsx(SignedOut, { status: status.data })
-  const pickScope = s => { $scope.set(s); persist() }
+  const all = !repo || repo === ALL
   return jsxs(Fragment, {
     children: [
       jsxs('div', {
         className: 'prs-top',
         children: [
-          jsx(SegmentedControl, { options: SCOPES, value: scope, onChange: pickScope, sizing: 'content' }),
-          jsx('div', { style: { flex: 1, minWidth: 0, display: 'flex' }, children: jsx(SearchField, { placeholder: 'Filter (#42, title, author, branch)', value: filter, onChange: setFilter, containerClassName: 'w-full' }) }),
+          Ic('repo'),
+          jsx(RepoSelect, {}),
           jsx(IconBtn, { icon: 'refresh', title: 'Refresh', onClick: () => qc.invalidateQueries({ queryKey: [ID] }) })
         ]
       }),
-      scope === 'repo'
-        ? jsx(RepoList, { filter })
-        : jsx('div', { className: 'prs-scroll', children: jsx(Inbox, { filter }) })
+      jsx('div', { className: 'prs-top', children: jsx(SearchField, { placeholder: 'Filter (#42, title, author, branch)', value: filter, onChange: setFilter, containerClassName: 'w-full' }) }),
+      all
+        ? jsx('div', { className: 'prs-scroll', children: jsx(Inbox, { filter }) })
+        : jsx(RepoList, { repo, filter }, repo)
     ]
   })
 }
@@ -1072,8 +1105,7 @@ export default {
   register(ctx) {
     CTX = ctx
     disposing = false
-    $repo.set(ctx.storage.get('repo', ''))
-    $scope.set(ctx.storage.get('scope', 'inbox') === 'repo' ? 'repo' : 'inbox')
+    $repo.set(ctx.storage.get('repo', '') || ALL)
     $watch.set(ctx.storage.get('watch', []))
     $drafts.set(ctx.storage.get('drafts', {}))
     lastSeen = ctx.storage.get('lastSeen', {})

@@ -7,7 +7,8 @@ Review GitHub pull requests without leaving Hermes — and hand any review comme
 ## Features
 
 - **Inbox** opens straight onto your open PRs across GitHub, grouped as *Needs your review*, *Your pull requests* and *Involves you*, plus the open PRs of your current project's repo. No repository to pick first. Click any row to open it.
-- **Repository view** for any `owner/repo` (personal or organisation) with Open / Merged / Closed / All. Filter by `#number`, title, author or branch; state, CI and review chips.
+- **Repository dropdown**: *All my open PRs*, your current project, every personal and organisation repo you can access, or *Other repository…* to type any `owner/repo`.
+- **Per-repository list** with Open / Merged / Closed / All. Filter by `#number`, title, author or branch; state, CI and review chips.
 - **Open / close from the status bar**: the pull-request icon (bottom right) and ⌘K → *PR Studio: Open / close pull requests* toggle a tile beside the chat. Closing it never disables the plugin.
 - **Conversation** — description, comments and reviews rendered from GitHub's own HTML, **including images in private repos** (fetched through your `gh` login by the backend).
 - **Files** — unified or split diff, existing review threads on the right lines, click any line number to comment.
