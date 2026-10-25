@@ -14,6 +14,8 @@ Review GitHub pull requests without leaving Hermes — and hand any review comme
 - **Files** — unified or split diff, existing review threads on the right lines, click any line number to comment.
 - **Review** — comment now, or queue comments and submit one review: **Comment / Approve / Request changes** (always confirmed first). Reply to threads.
 - **Send to Hermes** — on any comment, thread, pending comment or the whole PR: sends a structured prompt (repo, branch, `file:line`, diff hunk, comment) to your active chat so the agent can fix it.
+- **Review buttons** on every PR: *Review in this chat* sends the review request to the open chat in one click; *Review in new chat* opens the same model picker as the composer, and choosing a model starts the review in a fresh chat on that model.
+- **Images open inside Hermes**: click any screenshot for a full-size viewer (fit / actual size, Esc to close, optional Open on GitHub).
 - **Watch PRs** — eye icon on a PR; every 60 s it checks for new commits, CI changes, reviews and comments, then notifies you and badges the status-bar chip.
 - **Commits** and **Checks** tabs.
 

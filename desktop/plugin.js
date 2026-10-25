@@ -10,6 +10,11 @@ import {
   Button,
   Codicon,
   ConfirmDialog,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+  ModelCatalogMenu,
+  ModelMenuCloseContext,
   SearchField,
   SegmentedControl,
   Select,
@@ -33,6 +38,7 @@ const ALL = '*'
 const $repo = atom(ALL)
 const $selected = atom(null) // { repo, number } of the open PR
 const $open = atom(false) // PR Studio tile is open
+const $viewer = atom(null) // { src, alt, href } of the image shown full size
 const $watch = atom([]) // ['owner/repo#12', ...]
 const $watchChanges = atom({}) // key -> human summary of what changed
 const $drafts = atom({}) // 'owner/repo#12' -> [{path,line,side,body,hunk}]
@@ -222,6 +228,7 @@ function toggleStudio() {
 }
 
 function openPR(repo, number) {
+  $viewer.set(null)
   $selected.set({ repo, number })
   const key = prKey(repo, number)
   const c = { ...$watchChanges.get() }
@@ -294,6 +301,12 @@ const CSS = `
 .prs-ic{background:none;border:0;padding:2px 4px;color:var(--ui-text-tertiary);cursor:pointer;border-radius:3px;display:inline-flex;align-items:center}
 .prs-ic:hover{color:var(--ui-text-primary);background:var(--ui-bg-tertiary)}
 .prs-ic[data-on="1"]{color:var(--ui-accent)}
+.prs{position:relative}
+.prs-viewer{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;background:color-mix(in srgb,var(--ui-base,#000) 82%,transparent);backdrop-filter:blur(6px)}
+.prs-viewer-bar{display:flex;gap:6px;align-items:center;padding:8px;border-bottom:1px solid var(--ui-stroke-secondary);color:var(--ui-text-secondary)}
+.prs-viewer-img{flex:1;min-height:0;overflow:auto;display:flex;align-items:flex-start;justify-content:center;padding:12px;cursor:zoom-out}
+.prs-viewer-img img{max-width:100%;height:auto;border-radius:4px;border:1px solid var(--ui-stroke-tertiary)}
+.prs-viewer-img[data-full="1"] img{max-width:none}
 `
 
 // ------------------------------------------------------------- primitives
@@ -372,8 +385,18 @@ function Html({ html }) {
           img.alt = `${img.alt || 'image'} (could not load — open on GitHub)`
         })
     })
+    // Images open full size inside PR Studio; other links go to the browser.
+    root.querySelectorAll('img').forEach(img => {
+      img.style.cursor = 'zoom-in'
+      img.addEventListener('click', e => {
+        e.preventDefault()
+        e.stopPropagation()
+        if (!img.src || img.hasAttribute('data-loading')) return
+        $viewer.set({ src: img.src, alt: img.alt || '', href: img.closest('a[href]')?.href || img.getAttribute('data-gh-src') || '' })
+      })
+    })
     root.querySelectorAll('a[href]').forEach(a => {
-      a.addEventListener('click', e => { e.preventDefault(); CTX.os?.openExternal?.(a.href) })
+      a.addEventListener('click', e => { e.preventDefault(); if (!a.querySelector('img')) CTX.os?.openExternal?.(a.href) })
     })
     return () => { alive = false }
   }, [html])
@@ -1024,7 +1047,7 @@ function PRDetail({ repo, number }) {
   const [tab, setTab] = useState(CTX.storage.get('tab', 'conversation'))
   const detail = useQuery({ queryKey: [ID, 'pull', repo, number], queryFn: () => api(`/pull?${q({ repo, number })}`), refetchInterval: 60000 })
   const pickTab = t => { setTab(t); CTX.storage.set('tab', t) }
-  const back = jsx(IconBtn, { icon: 'arrow-left', title: 'Back to list', onClick: () => $selected.set(null) })
+  const back = jsx(IconBtn, { icon: 'arrow-left', title: 'Back to list', onClick: () => { $viewer.set(null); $selected.set(null) } })
   if (detail.isLoading) return jsxs(Fragment, { children: [jsx('div', { className: 'prs-top', children: back }), jsx(Loading, {})] })
   if (detail.error) return jsxs(Fragment, { children: [jsx('div', { className: 'prs-top', children: back }), jsx(ErrorBox, { error: detail.error, retry: detail.refetch })] })
   const pr = detail.data
@@ -1054,9 +1077,12 @@ function PRDetail({ repo, number }) {
               jsx('span', { className: 'prs-add', children: `+${pr.additions}` }), jsx('span', { className: 'prs-del', children: `−${pr.deletions}` })
             ]
           }),
-          jsx('div', {
+          jsxs('div', {
             className: 'prs-actions', style: { marginTop: 8 },
-            children: jsxs(Button, { size: 'xs', variant: 'outline', onClick: () => sendToHermes(promptForPR(repo, pr)), children: [Ic('sparkle', 12), ' Ask Hermes to review'] })
+            children: [
+              jsxs(Button, { size: 'xs', variant: 'outline', title: 'Send the review request to the chat you have open', onClick: () => sendToHermes(promptForPR(repo, pr)), children: [Ic('sparkle', 12), ' Review in this chat'] }),
+              jsx(NewChatReview, { repo, pr })
+            ]
           })
         ]
       }),
@@ -1070,6 +1096,91 @@ function PRDetail({ repo, number }) {
   })
 }
 
+// ------------------------------------------------------------ review flow
+// "Review in new chat": create a session pinned to the picked model, start
+// the review prompt in it, then open it. session.resume reattaches to the
+// live session, so the opened chat shows the review already running.
+async function reviewInNewChat(repo, pr, pick) {
+  const text = promptForPR(repo, pr)
+  try {
+    const cwd = host.state.cwd?.get?.() || ''
+    const created = await host.request('session.create', {
+      model: pick.model,
+      provider: pick.provider,
+      ...(pick.effort ? { reasoning_effort: pick.effort } : {}),
+      ...(cwd ? { cwd } : {}),
+      title: `Review PR #${pr.number}`
+    }, 60000)
+    const sid = created?.session_id
+    const stored = created?.stored_session_id || sid
+    if (!sid) throw new Error('Hermes did not return a session')
+    await host.request('prompt.submit', { session_id: sid, text }, 60000)
+    if (typeof host.openSession === 'function') await host.openSession(stored)
+    host.notify({ kind: 'success', message: `Reviewing #${pr.number} with ${pick.model} in a new chat` })
+  } catch (e) {
+    // Fall back to the plain path so the review is never lost.
+    host.notify({ kind: 'warning', message: `Could not start a new chat (${errText(e)}). Opening a blank chat with the prompt instead.` })
+    host.newChat?.()
+    setTimeout(() => sendToHermes(text, 'insert'), 600)
+  }
+}
+
+function NewChatReview({ repo, pr }) {
+  const [open, setOpen] = useState(false)
+  const [pick, setPick] = useState({ model: '', provider: '', effort: '' })
+  const start = (model, provider, effort) => {
+    setOpen(false)
+    reviewInNewChat(repo, pr, { model, provider, effort: effort ?? pick.effort })
+  }
+  // The same model menu the chat composer uses; choosing a model starts the review.
+  const controller = {
+    allowSpeed: false,
+    applyPreset: (preset, row) => setPick({ model: row.model, provider: row.provider, effort: preset.effort ?? '' }),
+    current: { effort: pick.effort, fast: false, model: pick.model, provider: pick.provider },
+    presetFor: () => ({}),
+    select: (model, provider) => start(model, provider),
+    setOptions: (patch, row) => { if (patch.effort !== undefined) setPick({ model: row.model, provider: row.provider, effort: patch.effort }) }
+  }
+  return jsxs(DropdownMenu, {
+    open, onOpenChange: setOpen,
+    children: [
+      jsx(DropdownMenuTrigger, { asChild: true, children: jsxs(Button, { size: 'xs', variant: 'outline', children: [Ic('add', 12), ' Review in new chat ', Ic('chevron-down', 11)] }) }),
+      jsx(DropdownMenuContent, {
+        align: 'start', className: 'w-72 p-0',
+        children: jsx(ModelMenuCloseContext.Provider, { value: () => setOpen(false), children: jsx(ModelCatalogMenu, { controller }) })
+      })
+    ]
+  })
+}
+
+function ImageViewer() {
+  const v = useValue($viewer)
+  const [full, setFull] = useState(false)
+  useEffect(() => {
+    if (!v) return
+    setFull(false)
+    const onKey = e => { if (e.key === 'Escape') $viewer.set(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [v])
+  if (!v) return null
+  return jsxs('div', {
+    className: 'prs-viewer', role: 'dialog', 'aria-label': v.alt || 'Image',
+    children: [
+      jsxs('div', {
+        className: 'prs-viewer-bar',
+        children: [
+          jsx('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: v.alt || 'Image' }),
+          jsx(IconBtn, { icon: full ? 'screen-normal' : 'screen-full', title: full ? 'Fit to pane' : 'Actual size', onClick: () => setFull(!full) }),
+          v.href && jsx(IconBtn, { icon: 'link-external', title: 'Open on GitHub', onClick: () => CTX.os?.openExternal?.(v.href) }),
+          jsx(IconBtn, { icon: 'close', title: 'Close (Esc)', onClick: () => $viewer.set(null) })
+        ]
+      }),
+      jsx('div', { className: 'prs-viewer-img', 'data-full': full ? '1' : '0', onClick: () => $viewer.set(null), children: jsx('img', { src: v.src, alt: v.alt, onClick: e => { e.stopPropagation(); setFull(!full) } }) })
+    ]
+  })
+}
+
 function Studio() {
   const selected = useValue($selected)
   return jsxs('div', {
@@ -1078,7 +1189,8 @@ function Studio() {
       jsx('style', { children: CSS }),
       selected
         ? jsx(PRDetail, { repo: selected.repo, number: selected.number }, `${selected.repo}#${selected.number}`)
-        : jsx(PRList, {})
+        : jsx(PRList, {}),
+      jsx(ImageViewer, {})
     ]
   })
 }
