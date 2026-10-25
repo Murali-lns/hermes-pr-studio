@@ -1,6 +1,6 @@
 name: hermes-pr-studio
-version: "0.1.0"
-description: "GitHub pull requests in Hermes Desktop: PR list, conversation with private-repo images, split/unified diffs with inline threads, line comments, replies, Approve / Request changes, watched PRs, and one-click Send to Hermes for any review comment. Uses your logged-in gh CLI."
+version: "0.2.0"
+description: "GitHub pull requests in Hermes Desktop: an inbox of your open PRs across repos, PR list, conversation with private-repo images, split/unified diffs with inline threads, line comments, replies, Approve / Request changes, watched PRs, and one-click Send to Hermes for any review comment. Uses your logged-in gh CLI."
 manifest_version: 1
 requires_hermes: ">=0.22.1"
 author: Murali-lns

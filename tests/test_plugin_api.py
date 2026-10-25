@@ -108,5 +108,29 @@ class Writes(unittest.TestCase):
         self.assertEqual(cm.exception.status_code, 503)
 
 
+
+class Inbox(unittest.TestCase):
+    def pr(self, repo, n):
+        return {"number": n, "title": f"t{n}", "repository": {"nameWithOwner": repo}, "comments": {"totalCount": 2},
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}
+
+    def test_groups_in_order_and_each_pr_listed_once(self):
+        data = {"review": {"nodes": [self.pr("o/a", 1)]},
+                "mine": {"nodes": [self.pr("o/a", 2), self.pr("o/a", 1)]},
+                "involved": {"nodes": [self.pr("o/a", 1), self.pr("o/b", 1), {}]}}
+        groups = p.build_inbox(data)
+        self.assertEqual([g["id"] for g in groups], ["review", "mine", "involved"])
+        self.assertEqual([(x["repo"], x["number"]) for g in groups for x in g["pulls"]],
+                         [("o/a", 1), ("o/a", 2), ("o/b", 1)])
+        first = groups[0]["pulls"][0]
+        self.assertEqual((first["checks"], first["commentCount"]), ("SUCCESS", 2))
+        self.assertNotIn("commits", first)
+
+    def test_missing_groups_are_empty_not_errors(self):
+        self.assertEqual([len(g["pulls"]) for g in p.build_inbox({})], [0, 0, 0])
+
+    def test_query_only_asks_for_open_unarchived_prs(self):
+        self.assertEqual(p.INBOX_Q.count("is:pr is:open archived:false"), 3)
+
 if __name__ == "__main__":
     unittest.main()

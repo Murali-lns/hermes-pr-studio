@@ -10,6 +10,8 @@ import {
   Button,
   Codicon,
   ConfirmDialog,
+  SearchField,
+  SegmentedControl,
   PALETTE_AREA,
   STATUSBAR_AREAS
 } from '@hermes/plugin-sdk'
@@ -21,8 +23,10 @@ const PANE_ID = `${ID}:studio`
 let CTX = null
 
 // ------------------------------------------------------------------ state
-const $repo = atom('')
-const $selected = atom(null) // PR number
+const $repo = atom('') // repository shown in the "Repository" scope
+const $scope = atom('inbox') // 'inbox' (open PRs across GitHub) | 'repo'
+const $selected = atom(null) // { repo, number } of the open PR
+const $open = atom(false) // PR Studio tile is open
 const $watch = atom([]) // ['owner/repo#12', ...]
 const $watchChanges = atom({}) // key -> human summary of what changed
 const $drafts = atom({}) // 'owner/repo#12' -> [{path,line,side,body,hunk}]
@@ -37,6 +41,7 @@ const errText = e => (e && (e.detail || e.message)) || String(e)
 
 function persist() {
   CTX.storage.set('repo', $repo.get())
+  CTX.storage.set('scope', $scope.get())
   CTX.storage.set('watch', $watch.get())
   CTX.storage.set('drafts', $drafts.get())
 }
@@ -165,8 +170,58 @@ async function pollWatch(silent = false) {
   $watchChanges.set(changes)
 }
 
-function revealPane() {
-  if (typeof host.revealPane === 'function') host.revealPane(PANE_ID)
+// PR Studio lives in a closeable workspace tile (host.openWorkspace) rather
+// than a static pane: Hermes treats Close on a plugin's only pane as "disable
+// the plugin", which left no way back except Settings → Plugins. The tile's
+// own ✕ fires onClose, so the status-bar button can reopen it at any time.
+const TILE_ID = ID
+const TILE_PANE = `plugin-workspace:${TILE_ID}`
+let closeTile = null
+let disposing = false
+
+const hasTile = () => typeof host.openWorkspace === 'function'
+
+function openStudio() {
+  if (!hasTile()) {
+    if (typeof host.revealPane === 'function') host.revealPane(PANE_ID)
+    return
+  }
+  closeTile = host.openWorkspace(TILE_ID, {
+    title: 'Pull requests',
+    dock: { pane: 'workspace', pos: 'right' },
+    minWidth: '24rem',
+    render: () => jsx(Studio, {}),
+    onClose: () => {
+      closeTile = null
+      $open.set(false)
+      // A plugin reload/disable tears the tile down too; only a user Close
+      // should forget that it was open.
+      if (!disposing) CTX?.storage.set('open', false)
+    }
+  })
+  $open.set(true)
+  CTX.storage.set('open', true)
+}
+
+function tileVisible() {
+  return typeof host.paneVisibility === 'function' ? host.paneVisibility(TILE_PANE).get() : true
+}
+
+// Status-bar button and ⌘K command: open when closed, bring to front when
+// it is open but behind another tab, close when it is already on screen.
+function toggleStudio() {
+  if (!hasTile()) return openStudio()
+  if (!closeTile) return openStudio()
+  if (!tileVisible()) return host.revealPane?.(TILE_PANE)
+  closeTile()
+}
+
+function openPR(repo, number) {
+  $selected.set({ repo, number })
+  const key = prKey(repo, number)
+  const c = { ...$watchChanges.get() }
+  delete c[key]
+  $watchChanges.set(c)
 }
 
 // ------------------------------------------------------------------ styles
@@ -174,8 +229,13 @@ const CSS = `
 .prs{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12.5px;color:var(--ui-text-primary)}
 .prs *{box-sizing:border-box}
 .prs-top{display:flex;gap:6px;align-items:center;padding:8px;border-bottom:1px solid var(--ui-stroke-secondary)}
-.prs-in{flex:1;min-width:0;background:var(--ui-bg-input);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);border-radius:4px;padding:4px 8px;font:inherit}
-.prs-in:focus{outline:1px solid var(--ui-accent)}
+.prs-in{flex:1;min-width:0;border-width:1px;border-style:solid;border-radius:2.5px;padding:4px 8px;font:inherit;color:var(--ui-text-primary)}
+.prs-in:focus{outline:none;border-color:var(--ui-accent)}
+.prs-in::placeholder,.prs-ta::placeholder{color:var(--ui-text-quaternary)}
+.prs-group{display:flex;align-items:center;gap:6px;padding:10px 10px 4px;font-size:10.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ui-text-tertiary)}
+.prs-group .prs-count{font-weight:400;color:var(--ui-text-quaternary)}
+.prs-repo{font-size:11px;color:var(--ui-text-tertiary);font-family:var(--font-mono,ui-monospace,monospace)}
+.prs-row:focus-visible{outline:1px solid var(--ui-accent);outline-offset:-1px}
 .prs-scroll{flex:1;min-height:0;overflow:auto}
 .prs-muted{color:var(--ui-text-tertiary)}
 .prs-faint{color:var(--ui-text-quaternary)}
@@ -207,7 +267,8 @@ const CSS = `
 .prs-md a{color:var(--ui-accent)}
 .prs-md p{margin:4px 0}.prs-md ul,.prs-md ol{padding-left:20px;margin:4px 0}
 .prs-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.prs-ta{width:100%;min-height:64px;resize:vertical;background:var(--ui-bg-input);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);border-radius:4px;padding:6px 8px;font:inherit}
+.prs-ta{width:100%;min-height:64px;resize:vertical;color:var(--ui-text-primary);border-width:1px;border-style:solid;border-radius:2.5px;padding:6px 8px;font:inherit}
+.prs-ta:focus{outline:none;border-color:var(--ui-accent)}
 .prs-file{border:1px solid var(--ui-stroke-secondary);border-radius:6px;margin:0 0 10px;overflow:hidden}
 .prs-file-h{display:flex;gap:6px;align-items:center;padding:6px 8px;background:var(--ui-bg-tertiary);cursor:pointer;position:sticky;top:0;z-index:1}
 .prs-file-h .prs-grow{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,ui-monospace,monospace);font-size:11.5px}
@@ -315,19 +376,121 @@ function Html({ html }) {
   return jsx('div', { ref, className: 'prs-md', dangerouslySetInnerHTML: { __html: html } })
 }
 
-// ------------------------------------------------------------ repo picker
-function RepoBar() {
-  const repo = useValue($repo)
+// ---------------------------------------------------------------- PR rows
+function PRRow({ pr, repo, showRepo }) {
+  const watch = useValue($watch)
+  const changes = useValue($watchChanges)
+  const key = prKey(repo, pr.number)
+  const open = () => openPR(repo, pr.number)
+  return jsxs('div', {
+    className: 'prs-row', role: 'button', tabIndex: 0, title: `Open #${pr.number}`,
+    onClick: open,
+    onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } },
+    children: [
+      jsx(Avatar, { user: pr.author }),
+      jsxs('div', {
+        style: { flex: 1, minWidth: 0 },
+        children: [
+          showRepo && jsx('div', { className: 'prs-repo', children: repo }),
+          jsxs('div', { className: 'prs-title', children: [pr.title, ' ', jsx('span', { className: 'prs-faint', children: `#${pr.number}` })] }),
+          jsxs('div', {
+            className: 'prs-meta',
+            children: [
+              jsx(StatePill, { pr }),
+              jsx(ChecksPill, { state: pr.checks }),
+              jsx(ReviewPill, { decision: pr.reviewDecision }),
+              jsx('span', { className: 'prs-add', children: `+${pr.additions}` }),
+              jsx('span', { className: 'prs-del', children: `−${pr.deletions}` }),
+              pr.commentCount ? jsxs('span', { children: [Ic('comment', 11), ' ', pr.commentCount] }) : null,
+              jsx('span', { children: `${pr.author?.login || 'ghost'} · ${ago(pr.updatedAt)}` }),
+              changes[key] && jsx('span', { className: 'prs-pill prs-wait', children: changes[key] })
+            ]
+          })
+        ]
+      }),
+      jsx(IconBtn, { icon: watch.includes(key) ? 'eye' : 'eye-closed', on: watch.includes(key), title: watch.includes(key) ? 'Stop watching' : 'Watch for new commits, checks and reviews', onClick: () => toggleWatch(key) })
+    ]
+  })
+}
+
+function matches(pr, f, repo) {
+  if (!f) return true
+  if (f.startsWith('#')) return String(pr.number) === f.slice(1)
+  return `${pr.title} ${pr.author?.login} ${pr.headRefName} ${repo || ''}`.toLowerCase().includes(f)
+}
+
+function useGhStatus() {
+  return useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), staleTime: 300000 })
+}
+
+function SignedOut({ status }) {
+  return jsx('div', {
+    className: 'prs-empty',
+    children: status.gh
+      ? jsxs(Fragment, { children: ['GitHub CLI is not signed in. Run ', jsx('code', { children: 'gh auth login' }), ' in a terminal, then retry.'] })
+      : jsxs(Fragment, { children: ['Install the GitHub CLI (', jsx('code', { children: 'gh' }), ') and run ', jsx('code', { children: 'gh auth login' }), '.'] })
+  })
+}
+
+function useProjectRepo() {
   const cwd = useValue(host.state.cwd)
-  const [text, setText] = useState(repo)
-  useEffect(() => setText(repo), [repo])
-  const repos = useQuery({ queryKey: [ID, 'repos'], queryFn: () => api('/repos'), staleTime: 300000 })
   const fromCwd = useQuery({
     queryKey: [ID, 'cwd', cwd],
     queryFn: () => api(`/repo-from-cwd?${q({ cwd: cwd || '' })}`),
-    enabled: Boolean(cwd)
+    enabled: Boolean(cwd),
+    staleTime: 60000
   })
-  const projectRepo = fromCwd.data?.repo
+  return fromCwd.data?.repo || null
+}
+
+// ------------------------------------------------------------- inbox scope
+// Opens straight onto your open PRs across GitHub — no repository to pick.
+function Inbox({ filter }) {
+  const projectRepo = useProjectRepo()
+  const inbox = useQuery({ queryKey: [ID, 'inbox'], queryFn: () => api('/inbox'), refetchInterval: 90000 })
+  const project = useQuery({
+    queryKey: [ID, 'pulls', projectRepo, 'OPEN'],
+    queryFn: () => api(`/pulls?${q({ repo: projectRepo, state: 'OPEN' })}`),
+    enabled: Boolean(projectRepo),
+    refetchInterval: 90000
+  })
+  if (inbox.isLoading) return jsx(Loading, { label: 'Loading your pull requests…' })
+  if (inbox.error) {
+    // The backend module loads once per Hermes run, so right after an update
+    // the new route is missing until Hermes restarts.
+    if (/not found|404/i.test(errText(inbox.error))) {
+      return jsx('div', { className: 'prs-empty', children: 'PR Studio was just updated. Restart Hermes to load your pull requests here — meanwhile, use the Repository tab.' })
+    }
+    return jsx(ErrorBox, { error: inbox.error, retry: inbox.refetch })
+  }
+  const f = filter.trim().toLowerCase()
+  const groups = (inbox.data?.groups || []).map(g => ({ ...g, pulls: g.pulls.map(pr => ({ ...pr, _repo: pr.repo })) }))
+  if (projectRepo && project.data?.pulls) {
+    const shown = new Set(groups.flatMap(g => g.pulls.map(pr => `${pr._repo}#${pr.number}`)))
+    const rest = project.data.pulls.filter(pr => !shown.has(`${projectRepo}#${pr.number}`)).map(pr => ({ ...pr, _repo: projectRepo }))
+    groups.push({ id: 'project', label: `Open in ${projectRepo}`, pulls: rest })
+  }
+  const visible = groups.map(g => ({ ...g, pulls: g.pulls.filter(pr => matches(pr, f, pr._repo)) })).filter(g => g.pulls.length)
+  if (!visible.length) {
+    return jsx('div', { className: 'prs-empty', children: f ? 'No pull requests match the filter.' : 'No open pull requests need you right now.' })
+  }
+  return jsx(Fragment, {
+    children: visible.map(g => jsxs(Fragment, {
+      children: [
+        jsxs('div', { className: 'prs-group', children: [g.label, jsx('span', { className: 'prs-count', children: g.pulls.length })] }),
+        ...g.pulls.map(pr => jsx(PRRow, { pr, repo: pr._repo, showRepo: g.id !== 'project' }, `${pr._repo}#${pr.number}`))
+      ]
+    }, g.id))
+  })
+}
+
+// --------------------------------------------------------- repository scope
+function RepoPicker() {
+  const repo = useValue($repo)
+  const projectRepo = useProjectRepo()
+  const [text, setText] = useState(repo)
+  useEffect(() => setText(repo), [repo])
+  const repos = useQuery({ queryKey: [ID, 'repos'], queryFn: () => api('/repos'), staleTime: 300000 })
   useEffect(() => {
     if (projectRepo && !$repo.get()) setRepo(projectRepo)
   }, [projectRepo])
@@ -341,7 +504,7 @@ function RepoBar() {
     children: [
       Ic('repo'),
       jsx('input', {
-        className: 'prs-in', list: `${ID}-repos`, value: text, placeholder: 'owner/repo',
+        className: 'prs-in desktop-input-chrome', list: `${ID}-repos`, value: text, placeholder: 'owner/repo',
         onChange: e => setText(e.target.value),
         onKeyDown: e => { if (e.key === 'Enter') submit() },
         onBlur: () => { if (text !== repo && text.includes('/')) submit() }
@@ -353,85 +516,62 @@ function RepoBar() {
   })
 }
 
-// ---------------------------------------------------------------- PR list
-function PRList() {
+const STATES = [{ id: 'OPEN', label: 'Open' }, { id: 'MERGED', label: 'Merged' }, { id: 'CLOSED', label: 'Closed' }, { id: 'ALL', label: 'All' }]
+
+function RepoList({ filter }) {
   const repo = useValue($repo)
-  const watch = useValue($watch)
-  const changes = useValue($watchChanges)
   const [state, setState] = useState('OPEN')
-  const [filter, setFilter] = useState('')
   const list = useQuery({
     queryKey: [ID, 'pulls', repo, state],
     queryFn: () => api(`/pulls?${q({ repo, state })}`),
     enabled: Boolean(repo),
     refetchInterval: 90000
   })
-  const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), staleTime: 300000 })
-  if (status.data && (!status.data.gh || !status.data.login)) {
-    return jsx('div', {
-      className: 'prs-empty',
-      children: status.data.gh
-        ? jsxs(Fragment, { children: ['GitHub CLI is not signed in. Run ', jsx('code', { children: 'gh auth login' }), ' in a terminal, then retry.'] })
-        : jsxs(Fragment, { children: ['Install the GitHub CLI (', jsx('code', { children: 'gh' }), ') and run ', jsx('code', { children: 'gh auth login' }), '.'] })
-    })
-  }
-  if (!repo) return jsx('div', { className: 'prs-empty', children: 'Pick a repository above, or open a project folder that has a GitHub remote.' })
   const f = filter.trim().toLowerCase()
-  const items = (list.data?.pulls || []).filter(pr =>
-    !f ? true : f.startsWith('#') ? String(pr.number) === f.slice(1) : `${pr.title} ${pr.author?.login} ${pr.headRefName}`.toLowerCase().includes(f)
-  )
+  const items = (list.data?.pulls || []).filter(pr => matches(pr, f))
+  return jsxs(Fragment, {
+    children: [
+      jsx(RepoPicker, {}),
+      repo && jsx('div', { className: 'prs-top', children: jsx(SegmentedControl, { options: STATES, value: state, onChange: setState, sizing: 'content' }) }),
+      jsx('div', {
+        className: 'prs-scroll',
+        children: !repo
+          ? jsx('div', { className: 'prs-empty', children: 'Type a repository as owner/name, or open a project folder that has a GitHub remote.' })
+          : list.isLoading
+            ? jsx(Loading, {})
+            : list.error
+              ? jsx(ErrorBox, { error: list.error, retry: list.refetch })
+              : !items.length
+                ? jsx('div', { className: 'prs-empty', children: 'No pull requests.' })
+                : items.map(pr => jsx(PRRow, { pr, repo }, pr.number))
+      })
+    ]
+  })
+}
+
+// ---------------------------------------------------------------- PR list
+const SCOPES = [{ id: 'inbox', label: 'Inbox' }, { id: 'repo', label: 'Repository' }]
+
+function PRList() {
+  const scope = useValue($scope)
+  const [filter, setFilter] = useState('')
+  const qc = useQueryClient()
+  const status = useGhStatus()
+  if (status.data && (!status.data.gh || !status.data.login)) return jsx(SignedOut, { status: status.data })
+  const pickScope = s => { $scope.set(s); persist() }
   return jsxs(Fragment, {
     children: [
       jsxs('div', {
         className: 'prs-top',
         children: [
-          jsx('input', { className: 'prs-in', placeholder: 'Filter (#42, title, author, branch)', value: filter, onChange: e => setFilter(e.target.value) }),
-          jsx('select', {
-            className: 'prs-in', style: { flex: 'none', width: 'auto' }, value: state, onChange: e => setState(e.target.value),
-            children: ['OPEN', 'MERGED', 'CLOSED', 'ALL'].map(s => jsx('option', { value: s, children: s.toLowerCase() }, s))
-          }),
-          jsx(IconBtn, { icon: 'refresh', title: 'Refresh', onClick: () => list.refetch() })
+          jsx(SegmentedControl, { options: SCOPES, value: scope, onChange: pickScope, sizing: 'content' }),
+          jsx('div', { style: { flex: 1, minWidth: 0, display: 'flex' }, children: jsx(SearchField, { placeholder: 'Filter (#42, title, author, branch)', value: filter, onChange: setFilter, containerClassName: 'w-full' }) }),
+          jsx(IconBtn, { icon: 'refresh', title: 'Refresh', onClick: () => qc.invalidateQueries({ queryKey: [ID] }) })
         ]
       }),
-      jsx('div', {
-        className: 'prs-scroll',
-        children: list.isLoading
-          ? jsx(Loading, {})
-          : list.error
-            ? jsx(ErrorBox, { error: list.error, retry: list.refetch })
-            : !items.length
-              ? jsx('div', { className: 'prs-empty', children: 'No pull requests.' })
-              : items.map(pr => {
-                const key = prKey(repo, pr.number)
-                return jsxs('div', {
-                  className: 'prs-row',
-                  onClick: () => { $selected.set(pr.number); const c = { ...$watchChanges.get() }; delete c[key]; $watchChanges.set(c) },
-                  children: [
-                    jsx(Avatar, { user: pr.author }),
-                    jsxs('div', {
-                      style: { flex: 1, minWidth: 0 },
-                      children: [
-                        jsxs('div', { className: 'prs-title', children: [pr.title, ' ', jsx('span', { className: 'prs-faint', children: `#${pr.number}` })] }),
-                        jsxs('div', {
-                          className: 'prs-meta',
-                          children: [
-                            jsx(StatePill, { pr }),
-                            jsx(ChecksPill, { state: pr.checks }),
-                            jsx(ReviewPill, { decision: pr.reviewDecision }),
-                            jsx('span', { className: 'prs-add', children: `+${pr.additions}` }),
-                            jsx('span', { className: 'prs-del', children: `−${pr.deletions}` }),
-                            pr.commentCount ? jsxs('span', { children: [Ic('comment', 11), ' ', pr.commentCount] }) : null,
-                            jsx('span', { children: `${pr.author?.login || 'ghost'} · ${ago(pr.updatedAt)}` }),
-                            changes[key] && jsx('span', { className: 'prs-pill prs-wait', children: changes[key] })
-                          ]
-                        })
-                      ]
-                    }),
-                    jsx(IconBtn, { icon: watch.includes(key) ? 'eye' : 'eye-closed', on: watch.includes(key), title: watch.includes(key) ? 'Stop watching' : 'Watch for new commits, checks and reviews', onClick: () => toggleWatch(key) })
-                  ]
-                }, pr.number)
-              })
-      })
+      scope === 'repo'
+        ? jsx(RepoList, { filter })
+        : jsx('div', { className: 'prs-scroll', children: jsx(Inbox, { filter }) })
     ]
   })
 }
@@ -490,7 +630,7 @@ function Thread({ t, repo, pr, hunk }) {
       jsxs('div', {
         style: { padding: '6px 10px', display: 'flex', flexDirection: 'column', gap: 6 },
         children: [
-          jsx('textarea', { className: 'prs-ta', style: { minHeight: 40 }, placeholder: 'Reply…', value: reply, onChange: e => setReply(e.target.value) }),
+          jsx('textarea', { className: 'prs-ta desktop-input-chrome', style: { minHeight: 40 }, placeholder: 'Reply…', value: reply, onChange: e => setReply(e.target.value) }),
           jsxs('div', {
             className: 'prs-actions',
             children: [
@@ -530,7 +670,7 @@ function LineComposer({ repo, pr, file, row, side, hunk, onClose }) {
     style: { display: 'flex', flexDirection: 'column', gap: 6 },
     children: [
       jsx('div', { className: 'prs-muted', children: `${file.filename}:${line}${side === 'LEFT' ? ' (old)' : ''}` }),
-      jsx('textarea', { className: 'prs-ta', autoFocus: true, placeholder: 'Leave a comment, or describe what Hermes should change…', value: text, onChange: e => setText(e.target.value) }),
+      jsx('textarea', { className: 'prs-ta desktop-input-chrome', autoFocus: true, placeholder: 'Leave a comment, or describe what Hermes should change…', value: text, onChange: e => setText(e.target.value) }),
       jsxs('div', {
         className: 'prs-actions',
         children: [
@@ -725,7 +865,7 @@ function ConversationTab({ repo, pr, refetch }) {
         ]
       }),
       pr.timeline.map(it => jsx(TimelineItem, { item: it, repo, pr }, it.id)),
-      jsx('textarea', { className: 'prs-ta', placeholder: 'Add a comment to the conversation…', value: text, onChange: e => setText(e.target.value) }),
+      jsx('textarea', { className: 'prs-ta desktop-input-chrome', placeholder: 'Add a comment to the conversation…', value: text, onChange: e => setText(e.target.value) }),
       jsx('div', { className: 'prs-actions', style: { marginTop: 6 }, children: jsx(Button, { size: 'xs', disabled: !text.trim() || busy, onClick: post, children: 'Comment' }) })
     ]
   })
@@ -820,7 +960,7 @@ function ReviewBar({ repo, pr, refetch }) {
             className: 'prs-muted', style: { display: 'flex', gap: 6, alignItems: 'center' },
             children: [jsx('code', { children: `${d.path}:${d.line}` }), jsx('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: d.body }), jsx(IconBtn, { icon: 'close', title: 'Remove', onClick: () => removeDraft(key, i) })]
           }, i)),
-          jsx('textarea', { className: 'prs-ta', placeholder: 'Review summary (optional for Approve / Comment)', value: summary, onChange: e => setSummary(e.target.value) }),
+          jsx('textarea', { className: 'prs-ta desktop-input-chrome', placeholder: 'Review summary (optional for Approve / Comment)', value: summary, onChange: e => setSummary(e.target.value) }),
           jsxs('div', {
             className: 'prs-actions',
             children: [
@@ -846,8 +986,7 @@ function ReviewBar({ repo, pr, refetch }) {
 }
 
 // --------------------------------------------------------------- PR detail
-function PRDetail({ number }) {
-  const repo = useValue($repo)
+function PRDetail({ repo, number }) {
   const watch = useValue($watch)
   const [tab, setTab] = useState(CTX.storage.get('tab', 'conversation'))
   const detail = useQuery({ queryKey: [ID, 'pull', repo, number], queryFn: () => api(`/pull?${q({ repo, number })}`), refetchInterval: 60000 })
@@ -900,13 +1039,13 @@ function PRDetail({ number }) {
 
 function Studio() {
   const selected = useValue($selected)
-  const repo = useValue($repo)
   return jsxs('div', {
     className: 'prs',
     children: [
       jsx('style', { children: CSS }),
-      !selected && jsx(RepoBar, {}),
-      selected && repo ? jsx(PRDetail, { number: selected }, `${repo}#${selected}`) : jsx(PRList, {})
+      selected
+        ? jsx(PRDetail, { repo: selected.repo, number: selected.number }, `${selected.repo}#${selected.number}`)
+        : jsx(PRList, {})
     ]
   })
 }
@@ -914,10 +1053,14 @@ function Studio() {
 function WatchChip() {
   const watch = useValue($watch)
   const changes = useValue($watchChanges)
+  const open = useValue($open)
   const n = Object.keys(changes).length
+  const label = open ? 'Close pull requests' : 'Open pull requests'
   return jsxs('button', {
-    className: 'prs-ic', title: n ? `PR Studio: ${n} watched PR${n > 1 ? 's' : ''} changed` : `PR Studio${watch.length ? ` · watching ${watch.length}` : ''}`,
-    onClick: revealPane,
+    className: 'prs-ic', 'data-on': open ? '1' : '0',
+    title: n ? `${label} · ${n} watched PR${n > 1 ? 's' : ''} changed` : `${label}${watch.length ? ` · watching ${watch.length}` : ''}`,
+    'aria-label': label,
+    onClick: () => toggleStudio(),
     style: { gap: 4, fontSize: 11 },
     children: [Ic('git-pull-request', 13), watch.length ? jsx('span', { children: n ? `${n} new` : watch.length }) : null]
   })
@@ -928,26 +1071,34 @@ export default {
   name: 'PR Studio',
   register(ctx) {
     CTX = ctx
+    disposing = false
     $repo.set(ctx.storage.get('repo', ''))
+    $scope.set(ctx.storage.get('scope', 'inbox') === 'repo' ? 'repo' : 'inbox')
     $watch.set(ctx.storage.get('watch', []))
     $drafts.set(ctx.storage.get('drafts', {}))
     lastSeen = ctx.storage.get('lastSeen', {})
 
-    ctx.registerMany([
-      {
-        id: 'studio',
-        area: 'panes',
-        title: 'PR Studio',
-        data: { placement: 'right', width: '560px' },
-        render: () => jsx(Studio, {})
-      },
+    const items = [
       {
         id: 'open',
         area: PALETTE_AREA,
-        data: { id: 'open', label: 'PR Studio: Open pull requests', keywords: ['github', 'pr', 'review', 'pull request'], run: revealPane }
+        data: { id: 'open', label: 'PR Studio: Open / close pull requests', keywords: ['github', 'pr', 'review', 'pull request'], run: () => toggleStudio() }
       },
       { id: 'chip', area: STATUSBAR_AREAS.right, order: 50, render: () => jsx(WatchChip, {}) }
-    ])
+    ]
+    // Older desktops without openWorkspace keep the original side pane.
+    if (!hasTile()) {
+      items.unshift({ id: 'studio', area: 'panes', title: 'PR Studio', data: { placement: 'right', width: '560px' }, render: () => jsx(Studio, {}) })
+    }
+    ctx.registerMany(items)
+
+    // Disabling or hot-reloading the plugin removes its tile; a reload then
+    // reopens it below if it was open, so edits never strand a stale tile.
+    ctx.onDispose?.(() => {
+      disposing = true
+      closeTile?.()
+    })
+    if (hasTile() && ctx.storage.get('open', false)) openStudio()
 
     pollWatch(true)
     ctx.setInterval(() => pollWatch(false), 60000)

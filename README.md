@@ -6,7 +6,9 @@ Review GitHub pull requests without leaving Hermes — and hand any review comme
 
 ## Features
 
-- **PR list** for the repo of your open project (auto-detected from `git remote`), or any `owner/repo` — personal and organisation repos. Filter by `#number`, title, author or branch; state, CI and review chips.
+- **Inbox** opens straight onto your open PRs across GitHub, grouped as *Needs your review*, *Your pull requests* and *Involves you*, plus the open PRs of your current project's repo. No repository to pick first. Click any row to open it.
+- **Repository view** for any `owner/repo` (personal or organisation) with Open / Merged / Closed / All. Filter by `#number`, title, author or branch; state, CI and review chips.
+- **Open / close from the status bar**: the pull-request icon (bottom right) and ⌘K → *PR Studio: Open / close pull requests* toggle a tile beside the chat. Closing it never disables the plugin.
 - **Conversation** — description, comments and reviews rendered from GitHub's own HTML, **including images in private repos** (fetched through your `gh` login by the backend).
 - **Files** — unified or split diff, existing review threads on the right lines, click any line number to comment.
 - **Review** — comment now, or queue comments and submit one review: **Comment / Approve / Request changes** (always confirmed first). Reply to threads.
@@ -29,12 +31,12 @@ Then enable the Desktop half in **Capabilities → Plugins** (desktop halves shi
 
 ## Disclosure
 
-- **Shell commands:** the Python backend runs your logged-in `gh` CLI (`gh api`, `gh api graphql`, `gh repo list`) and `git remote get-url origin` in the open project folder. Argument lists only, no shell; 30–40 s timeouts.
+- **Shell commands:** the Python backend runs your logged-in `gh` CLI (`gh api`, `gh api graphql` including PR search, `gh repo list`) and `git remote get-url origin` in the open project folder. Argument lists only, no shell; 30–40 s timeouts.
 - **Network:** only through `gh`, to the GitHub API. Public images and avatars load directly from GitHub's CDN.
 - **GitHub writes** happen only when you click: issue comment, line comment, reply, review submission. Every review submission is confirmed.
 - **Credentials:** none stored or read. `gh` authenticates itself; the plugin never touches its token.
 - **Background work:** while Desktop is open, watched PRs are polled every 60 s (one GraphQL call for all of them) and open PR views refresh every 60–90 s. No other background processes.
-- **Local data:** selected repo, watch list and pending review comments in Desktop plugin storage.
+- **Local data:** open/closed state, selected view and repo, watch list and pending review comments in Desktop plugin storage.
 - **HTML:** GitHub-rendered HTML is re-sanitised by an allowlist in the backend (no scripts, styles, iframes, event handlers or non-http links).
 - No telemetry.
 

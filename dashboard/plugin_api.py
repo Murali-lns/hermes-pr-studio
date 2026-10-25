@@ -321,6 +321,58 @@ def pulls(repo: str, state: str = "OPEN"):
     return {"pulls": items}
 
 
+PR_FIELDS = """number title isDraft state updatedAt additions deletions headRefName baseRefName reviewDecision url
+        author{login avatarUrl}
+        repository{nameWithOwner}
+        comments{totalCount}
+        commits(last:1){nodes{commit{statusCheckRollup{state}}}}"""
+
+# Three searches in one round trip, grouped the way a review queue reads:
+# what waits on you, what you opened, and everything else you're part of.
+INBOX_GROUPS = (
+    ("review", "Needs your review", "review-requested:@me"),
+    ("mine", "Your pull requests", "author:@me"),
+    ("involved", "Involves you", "involves:@me"),
+)
+INBOX_Q = "query{" + "".join(
+    f'{key}:search(query:"is:pr is:open archived:false {filt} sort:updated-desc",type:ISSUE,first:40)'
+    f"{{nodes{{... on PullRequest{{ {PR_FIELDS} }}}}}}"
+    for key, _, filt in INBOX_GROUPS
+) + "}"
+
+
+def _flatten_pr(pr: dict) -> dict:
+    pr["checks"] = _rollup(pr)
+    pr["commentCount"] = (pr.pop("comments", None) or {}).get("totalCount", 0)
+    pr["repo"] = (pr.pop("repository", None) or {}).get("nameWithOwner")
+    pr.pop("commits", None)
+    return pr
+
+
+def build_inbox(data: dict) -> list[dict]:
+    """Group search results; a PR appears only in the first group that holds it."""
+    seen: set[tuple[str, int]] = set()
+    groups = []
+    for key, label, _ in INBOX_GROUPS:
+        items = []
+        for pr in ((data.get(key) or {}).get("nodes") or []):
+            if not pr or "number" not in pr:
+                continue
+            pr = _flatten_pr(pr)
+            ident = (pr["repo"], pr["number"])
+            if ident in seen:
+                continue
+            seen.add(ident)
+            items.append(pr)
+        groups.append({"id": key, "label": label, "pulls": items})
+    return groups
+
+
+@router.get("/inbox")
+def inbox():
+    return {"groups": cached("inbox", 20, lambda: build_inbox(graphql(INBOX_Q, {})))}
+
+
 PR_Q = """
 query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
